@@ -1,0 +1,24 @@
+# dependencias
+node_modules/
+.next/
+out/
+build/
+
+# entorno y secretos
+.env
+.env.local
+.env*.local
+*.key
+.pem
+
+# datos privados del panel
+data/
+
+# workspace de usuario (contenido, no codigo)
+workspace/**/*
+!workspace/**/.gitkeep
+
+# sistema
+Thumbs.db
+desktop.ini
+*.log

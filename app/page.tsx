@@ -1,0 +1,1279 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import Entrar from "./entrar";
+
+type Vista = "estudio" | "proyectos" | "calendario" | "cuentas";
+type Mensaje = { role: "user" | "assistant"; text: string; plan?: string };
+type Asset = { id: string; name: string; size: number; type: string };
+type Formato = "vertical" | "horizontal" | "cuadrado";
+
+type Cuenta = {
+  id: string;
+  channelId: string;
+  title: string;
+  thumbnail?: string;
+  subscribers: string;
+  videos: string;
+  views: string;
+  shared?: boolean;
+};
+
+type EstadoYT = {
+  configured: boolean;
+  connected: boolean;
+  redirectUri?: string;
+  accounts: Cuenta[];
+};
+
+type Resultado = {
+  ok: true;
+  id: string;
+  url: string;
+  channel?: string;
+  publishAt?: string | null;
+  thumbnailWarning?: string | null;
+};
+
+type Programado = {
+  id: string;
+  videoId: string;
+  url: string;
+  canal: string;
+  titulo: string;
+  publishAt: string;
+};
+
+const FORMATO_ASPECTO: Record<Formato, string> = {
+  vertical: "9 / 16",
+  horizontal: "16 / 9",
+  cuadrado: "1 / 1",
+};
+
+function mmss(v: number) {
+  if (!Number.isFinite(v)) return "00:00";
+  const m = Math.floor(v / 60);
+  const s = Math.floor(v % 60);
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
+function peso(bytes: number) {
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function formatoDur(seg?: number) {
+  if (!seg || seg < 0) return "—";
+  const m = Math.floor(seg / 60);
+  const s = Math.round(seg % 60);
+  return m > 0 ? `${m} min ${String(s).padStart(2, "0")}s` : `${s}s`;
+}
+
+type ResumenPlan = {
+  titulo: string;
+  gancho: string;
+  duracion: number;
+  escenas: number;
+  cierre: string;
+};
+
+type EscenaPlan = {
+  n?: number;
+  descripcion?: string;
+  busqueda?: string;
+  dur?: number;
+  movimiento?: string;
+};
+
+type PlanObj = {
+  titulo?: string;
+  gancho?: string;
+  vozTexto?: string;
+  duracion?: number;
+  escenas?: EscenaPlan[];
+  musica?: string;
+  cierre?: string;
+};
+
+function leerPlan(raw?: string | null): PlanObj | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as PlanObj;
+  } catch {
+    return null;
+  }
+}
+
+function resumenPlan(raw?: string | null): ResumenPlan | null {
+  const p = leerPlan(raw);
+  if (!p) return null;
+  return {
+    titulo: p.titulo || "Sin título",
+    gancho: p.gancho || "",
+    duracion: typeof p.duracion === "number" ? p.duracion : 0,
+    escenas: Array.isArray(p.escenas) ? p.escenas.length : 0,
+    cierre: p.cierre || "",
+  };
+}
+
+export default function Page() {
+  const [usuario, setUsuario] = useState<{ id: string; email: string; nombre: string } | null>(null);
+  const [cargandoAuth, setCargandoAuth] = useState(true);
+  const [hayUsuarios, setHayUsuarios] = useState(true);
+  const [vista, setVista] = useState<Vista>("estudio");
+  const [proyecto, setProyecto] = useState("Mi primer proyecto");
+  const [formato, setFormato] = useState<Formato>("vertical");
+
+  const [video, setVideo] = useState<File | null>(null);
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [assets, setAssets] = useState<Asset[]>([]);
+  const [duracion, setDuracion] = useState(0);
+  const [actual, setActual] = useState(0);
+
+  const [chat, setChat] = useState<Mensaje[]>([
+    {
+      role: "assistant",
+      text: "Hola. Puedo ayudarte a preparar el video, escribir el guion, armar los metadatos o dejarlo listo para publicar. ¿Qué querés hacer?",
+    },
+  ]);
+  const [entrada, setEntrada] = useState("");
+  const [pensando, setPensando] = useState(false);
+  const [motor, setMotor] = useState<string>("");
+  const [plan, setPlan] = useState<string | null>(null);
+  const [job, setJob] = useState<{
+    id: string;
+    estado: string;
+    progreso: number;
+    mensaje: string;
+    estimado?: number;
+    transcurrido?: number;
+  } | null>(null);
+  const [generando, setGenerando] = useState(false);
+  const [editor, setEditor] = useState(false);
+  const [borrador, setBorrador] = useState<PlanObj | null>(null);
+
+  const [yt, setYt] = useState<EstadoYT | null>(null);
+  const [mostrarGuia, setMostrarGuia] = useState(false);
+  const [modal, setModal] = useState(false);
+  const [titulo, setTitulo] = useState("");
+  const [descripcion, setDescripcion] = useState("");
+  const [tags, setTags] = useState("shorts");
+  const [privacidad, setPrivacidad] = useState<"public" | "unlisted" | "private">("public");
+  const [miniatura, setMiniatura] = useState<File | null>(null);
+  const [cuentaSel, setCuentaSel] = useState<string>("");
+  const [programar, setProgramar] = useState(false);
+  const [cuando, setCuando] = useState("");
+  const [agenda, setAgenda] = useState<Programado[]>([]);
+  const [subiendo, setSubiendo] = useState(false);
+  const [resultado, setResultado] = useState<Resultado | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const [toast, setToast] = useState<{ texto: string; error?: boolean } | null>(null);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const inputVideo = useRef<HTMLInputElement | null>(null);
+  const inputAssets = useRef<HTMLInputElement | null>(null);
+  const inputMini = useRef<HTMLInputElement | null>(null);
+
+  const avisar = useCallback((texto: string, esError = false) => {
+    setToast({ texto, error: esError });
+    window.setTimeout(() => setToast(null), 4500);
+  }, []);
+
+  const cargarEstado = useCallback(async () => {
+    try {
+      const res = await fetch("/api/youtube/status", { cache: "no-store" });
+      const data = (await res.json()) as EstadoYT;
+      setYt(data);
+      setCuentaSel((prev) => (prev && data.accounts.some((a) => a.id === prev) ? prev : data.accounts[0]?.id ?? ""));
+    } catch {
+      setYt({ configured: false, connected: false, accounts: [] });
+    }
+  }, []);
+
+  const cargarAgenda = useCallback(async () => {
+    try {
+      const res = await fetch("/api/schedule", { cache: "no-store" });
+      const data = (await res.json()) as { items?: Programado[] };
+      setAgenda(data.items ?? []);
+    } catch {
+      setAgenda([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetch("/api/auth/me", { cache: "no-store" })
+      .then((r) => r.json())
+      .then((d: { usuario: { id: string; email: string; nombre: string } | null; hayUsuarios: boolean }) => {
+        setUsuario(d.usuario);
+        setHayUsuarios(d.hayUsuarios);
+      })
+      .catch(() => setUsuario(null))
+      .finally(() => setCargandoAuth(false));
+  }, []);
+
+  useEffect(() => {
+    if (!usuario) return;
+    cargarEstado();
+    cargarAgenda();
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("conectado")) {
+      avisar("Cuenta de YouTube conectada");
+      setVista("cuentas");
+      window.history.replaceState({}, "", "/");
+    }
+    const err = params.get("error");
+    if (err) {
+      avisar(decodeURIComponent(err), true);
+      setVista("cuentas");
+      window.history.replaceState({}, "", "/");
+    }
+  }, [avisar, cargarAgenda, cargarEstado]);
+
+  useEffect(() => {
+    return () => {
+      if (videoUrl) URL.revokeObjectURL(videoUrl);
+    };
+  }, [videoUrl]);
+
+  function elegirVideo(file: File | null) {
+    if (!file) return;
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    setVideo(file);
+    setVideoUrl(URL.createObjectURL(file));
+    setResultado(null);
+    setError(null);
+    if (!titulo) setTitulo(file.name.replace(/\.[^.]+$/, "").slice(0, 95));
+  }
+
+  function agregarAssets(lista: FileList | null) {
+    if (!lista) return;
+    const nuevos = Array.from(lista).map((f) => ({
+      id: `${f.name}-${f.size}-${f.lastModified}`,
+      name: f.name,
+      size: f.size,
+      type: f.type.split("/")[0] || "archivo",
+    }));
+    setAssets((prev) => {
+      const ids = new Set(prev.map((a) => a.id));
+      return [...prev, ...nuevos.filter((n) => !ids.has(n.id))];
+    });
+  }
+
+  async function enviar(texto: string) {
+    const limpio = texto.trim();
+    if (!limpio || pensando) return;
+
+    const historial: Mensaje[] = [...chat, { role: "user", text: limpio }];
+    setChat(historial);
+    setEntrada("");
+    setPensando(true);
+
+    const contexto = [
+      `proyecto:${proyecto}`,
+      `formato:${formato}`,
+      `video:${video ? "si" : "no"}`,
+      `assets:${assets.length}`,
+      `canales:${yt?.accounts.length ?? 0}`,
+    ].join(" | ");
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: historial, context: contexto }),
+      });
+      const data = (await res.json()) as {
+        reply?: string;
+        error?: string;
+        motor?: string;
+        plan?: string | null;
+      };
+      setChat((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          text: data.reply || data.error || "No pude responder.",
+          plan: data.plan ?? undefined,
+        },
+      ]);
+      if (data.motor) setMotor(data.motor);
+      if (data.plan) setPlan(data.plan);
+    } catch {
+      setChat((prev) => [
+        ...prev,
+        { role: "assistant", text: "No pude conectar con el asistente. Revisá la consola del servidor." },
+      ]);
+    } finally {
+      setPensando(false);
+    }
+  }
+
+  async function generarReel() {
+    if (!plan || generando) return;
+    setGenerando(true);
+    setJob({ id: "", estado: "encolado", progreso: 0, mensaje: "Encolado" });
+
+    try {
+      const res = await fetch("/api/render", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plan }),
+      });
+      const data = (await res.json()) as { id?: string; error?: string };
+      if (!res.ok || !data.id) throw new Error(data.error || "No se pudo iniciar el render");
+
+      const id = data.id;
+      setJob({ id, estado: "encolado", progreso: 5, mensaje: "Encolado" });
+
+      for (let intento = 0; intento < 300; intento++) {
+        await new Promise((r) => window.setTimeout(r, 2500));
+        const r2 = await fetch(`/api/render?id=${id}`, { cache: "no-store" });
+        const s = (await r2.json()) as {
+          estado?: string;
+          progreso?: number;
+          mensaje?: string;
+          video?: string | null;
+          estimadoSegundos?: number;
+          transcurridoSegundos?: number;
+          error?: string;
+        };
+        if (s.error) throw new Error(s.error);
+
+        setJob({
+          id,
+          estado: s.estado || "renderizando",
+          progreso: s.progreso ?? 0,
+          mensaje: s.mensaje || "",
+          estimado: s.estimadoSegundos,
+          transcurrido: s.transcurridoSegundos,
+        });
+
+        if (s.estado === "listo") {
+          const archivo = await fetch(`/api/render/file?id=${id}`);
+          const blob = await archivo.blob();
+          const f = new File([blob], `reel-${id}.mp4`, { type: "video/mp4" });
+          if (videoUrl) URL.revokeObjectURL(videoUrl);
+          setVideo(f);
+          setVideoUrl(URL.createObjectURL(f));
+          avisar("Reel generado. Ya podés publicarlo.");
+          break;
+        }
+        if (s.estado === "error") {
+          avisar(s.mensaje || "El render falló", true);
+          break;
+        }
+      }
+    } catch (error) {
+      avisar(error instanceof Error ? error.message : "Error al generar el reel", true);
+    } finally {
+      setGenerando(false);
+    }
+  }
+
+  async function publicar() {
+    if (!video) return setError("Primero cargá un video en la preview.");
+    if (!titulo.trim()) return setError("El título es obligatorio.");
+    if (!cuentaSel) return setError("Conectá una cuenta de YouTube primero.");
+
+    setSubiendo(true);
+    setError(null);
+    setResultado(null);
+
+    const fd = new FormData();
+    fd.append("video", video);
+    fd.append("title", titulo.trim());
+    fd.append("description", descripcion);
+    fd.append("tags", tags);
+    fd.append("privacy", privacidad);
+    fd.append("accountId", cuentaSel);
+    if (programar && cuando) fd.append("publishAt", new Date(cuando).toISOString());
+    if (miniatura) fd.append("thumbnail", miniatura);
+
+    try {
+      const res = await fetch("/api/youtube/upload", { method: "POST", body: fd });
+      const data = (await res.json()) as Resultado & { error?: string };
+      if (!res.ok || !data.ok) setError(data.error || "Falló la subida.");
+      else {
+        setResultado(data);
+        avisar(
+          data.publishAt
+            ? `Programado para ${new Date(data.publishAt).toLocaleString("es")}`
+            : "Video publicado en YouTube",
+        );
+        if (data.publishAt) cargarAgenda();
+      }
+    } catch {
+      setError("No se pudo conectar con el servidor.");
+    } finally {
+      setSubiendo(false);
+    }
+  }
+
+  async function desconectar(id: string, tituloCanal: string) {
+    if (!window.confirm(`¿Desconectar "${tituloCanal}" de este panel?`)) return;
+    try {
+      const res = await fetch("/api/youtube/status", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id }),
+      });
+      const data = (await res.json()) as { accounts?: Cuenta[] };
+      setYt((prev) => (prev ? { ...prev, accounts: data.accounts ?? [], connected: (data.accounts ?? []).length > 0 } : prev));
+      avisar("Cuenta desconectada");
+    } catch {
+      avisar("No se pudo desconectar", true);
+    }
+  }
+
+  const cuentas = yt?.accounts ?? [];
+  const conectado = cuentas.length > 0;
+
+  if (cargandoAuth) {
+    return (
+      <div className="auth-wrap">
+        <div className="auth-card" style={{ textAlign: "center" }}>
+          <span className="spinner" style={{ width: 22, height: 22 }} />
+          <p style={{ color: "var(--muted)", marginTop: 12 }}>Cargando el panel…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!usuario) {
+    return <Entrar hayUsuarios={hayUsuarios} onEntrar={(u) => setUsuario(u)} />;
+  }
+
+  return (
+    <div className="layout">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-mark">✦</span>
+          <span>MediaPilot</span>
+        </div>
+        <nav>
+          {(
+            [
+              ["estudio", "▣", "Estudio"],
+              ["proyectos", "◫", "Proyectos"],
+              ["calendario", "◷", "Calendario"],
+              ["cuentas", "◎", "Cuentas"],
+            ] as Array<[Vista, string, string]>
+          ).map(([id, ico, label]) => (
+            <button
+              key={id}
+              className={`nav-item${vista === id ? " active" : ""}`}
+              onClick={() => setVista(id)}
+            >
+              <span className="ico">{ico}</span>
+              <span>{label}</span>
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-user">
+          <div className="avatar-mini">{usuario.nombre.slice(0, 1).toUpperCase()}</div>
+          <div className="datos">
+            <strong>{usuario.nombre}</strong>
+            <span>{usuario.email}</span>
+          </div>
+          <button
+            className="salir"
+            title="Cerrar sesión"
+            onClick={async () => {
+              await fetch("/api/auth/logout", { method: "POST" });
+              window.location.reload();
+            }}
+          >
+            ⏻
+          </button>
+        </div>
+
+        <div className="sidebar-bottom">
+          <span className={`dot ${conectado ? "on" : "off"}`} />
+          {conectado
+            ? cuentas.length === 1
+              ? cuentas[0].title
+              : `${cuentas.length} canales conectados`
+            : "YouTube sin conectar"}
+        </div>
+      </aside>
+
+      <main className="main">
+        <header className="topbar">
+          <div>
+            <p className="eyebrow">CENTRO DE PRODUCCIÓN</p>
+            <h1>
+              {vista === "estudio" && "Estudio"}
+              {vista === "proyectos" && "Proyectos"}
+              {vista === "calendario" && "Calendario"}
+              {vista === "cuentas" && "Cuentas conectadas"}
+            </h1>
+          </div>
+          {vista === "estudio" && (
+            <button
+              className="button primary"
+              onClick={() => {
+                if (!video) return avisar("Cargá un video para continuar", true);
+                if (!conectado) {
+                  avisar("Primero conectá tu cuenta de YouTube", true);
+                  setVista("cuentas");
+                  return;
+                }
+                setModal(true);
+              }}
+            >
+              Publicar en YouTube →
+            </button>
+          )}
+        </header>
+
+        {vista === "estudio" && (
+          <>
+            {!conectado && (
+              <div className="alert warn" style={{ marginTop: 0, marginBottom: 14 }}>
+                Todavía no conectaste tu cuenta de YouTube.{" "}
+                <strong
+                  style={{ cursor: "pointer", textDecoration: "underline" }}
+                  onClick={() => setVista("cuentas")}
+                >
+                  Conectala acá
+                </strong>{" "}
+                para poder publicar.
+              </div>
+            )}
+
+            <div className="project-strip">
+              <div style={{ flex: 1, minWidth: 220 }}>
+                <label>PROYECTO ACTUAL</label>
+                <input value={proyecto} onChange={(e) => setProyecto(e.target.value)} />
+              </div>
+              <div>
+                <label>FORMATO</label>
+                <select value={formato} onChange={(e) => setFormato(e.target.value as Formato)}>
+                  <option value="vertical">Vertical 9:16</option>
+                  <option value="horizontal">Horizontal 16:9</option>
+                  <option value="cuadrado">Cuadrado 1:1</option>
+                </select>
+              </div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                <span className={`dot ${conectado ? "on" : "off"}`} />
+                {conectado ? "Listo para publicar" : "Sin canal conectado"}
+              </div>
+            </div>
+
+            <div className="studio-grid">
+              <section className="card">
+                <div className="card-head">
+                  <div>
+                    <h2>Preview</h2>
+                    <p>{video ? video.name : "Todavía no hay video"}</p>
+                  </div>
+                  <button className="button ghost" onClick={() => inputVideo.current?.click()}>
+                    {video ? "Cambiar" : "＋ Añadir video"}
+                  </button>
+                  <input
+                    ref={inputVideo}
+                    type="file"
+                    accept="video/*"
+                    hidden
+                    onChange={(e) => elegirVideo(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+
+                <div className="preview-stage">
+                  <div className="video-shell" style={{ aspectRatio: FORMATO_ASPECTO[formato] }}>
+                    {videoUrl ? (
+                      <video
+                        ref={videoRef}
+                        src={videoUrl}
+                        controls
+                        playsInline
+                        onLoadedMetadata={(e) => setDuracion(e.currentTarget.duration)}
+                        onTimeUpdate={(e) => setActual(e.currentTarget.currentTime)}
+                      />
+                    ) : (
+                      <div className="empty-preview">
+                        <div className="play-icon">▶</div>
+                        <strong>Subí un video para empezar</strong>
+                        <small>MP4, MOV o WEBM · cualquier temática</small>
+                        <button
+                          className="button secondary"
+                          style={{ marginTop: 8 }}
+                          onClick={() => inputVideo.current?.click()}
+                        >
+                          Elegir archivo
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="timeline">
+                  <span>{mmss(actual)}</span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={duracion ? (actual / duracion) * 100 : 0}
+                    onChange={(e) => {
+                      if (videoRef.current && duracion) {
+                        videoRef.current.currentTime = (Number(e.target.value) / 100) * duracion;
+                      }
+                    }}
+                  />
+                  <span>{mmss(duracion)}</span>
+                </div>
+              </section>
+
+              <section className="card chat-card">
+                <div className="card-head">
+                  <div>
+                    <h2>Asistente</h2>
+                    <p>{motor || "DeepSeek V4.1 Flash"}</p>
+                  </div>
+                  <span className="badge gray">IA</span>
+                </div>
+
+                <div className="chat-messages">
+                  {chat.map((m, i) => {
+                    const r = resumenPlan(m.plan);
+                    return (
+                      <div key={i} className={`message ${m.role}`}>
+                        {m.text.replace(/```plan[\s\S]*?```/gi, "").trim() || "Plan de producción generado."}
+                        {r && (
+                          <div className="plan-chip">
+                            <div>
+                              <strong>{r.titulo}</strong>
+                              <small>
+                                {r.duracion}s · {r.escenas} escenas
+                              </small>
+                            </div>
+                            <span>plan</span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  {pensando && <div className="message assistant">…</div>}
+                  {chat.length <= 2 && (
+                    <div className="suggestions">
+                      <button onClick={() => enviar("Proponé 3 títulos para este video")}>
+                        Proponer títulos
+                      </button>
+                      <button onClick={() => enviar("Escribí la descripción con hashtags")}>
+                        Descripción
+                      </button>
+                      <button onClick={() => enviar("¿Qué miniatura me conviene?")}>
+                        Miniatura
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <form
+                  className="chat-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    enviar(entrada);
+                  }}
+                >
+                  <input
+                    value={entrada}
+                    onChange={(e) => setEntrada(e.target.value)}
+                    placeholder="Escribí una instrucción..."
+                  />
+                  <button className="send" type="submit" disabled={pensando}>
+                    ➤
+                  </button>
+                </form>
+              </section>
+            </div>
+
+            <section className="card assets-card">
+              <div className="card-head">
+                <div>
+                  <h2>Activos del proyecto</h2>
+                  <p>
+                    {assets.length} archivo{assets.length === 1 ? "" : "s"}
+                  </p>
+                </div>
+                <button className="button secondary" onClick={() => inputAssets.current?.click()}>
+                  ＋ Añadir archivos
+                </button>
+                <input
+                  ref={inputAssets}
+                  type="file"
+                  multiple
+                  accept="video/*,image/*,audio/*"
+                  hidden
+                  onChange={(e) => agregarAssets(e.target.files)}
+                />
+              </div>
+              <div className="asset-list">
+                {assets.length === 0 && (
+                  <div className="asset-empty">
+                    Tus videos, imágenes y audios aparecerán aquí. Se guardan en el proyecto.
+                  </div>
+                )}
+                {assets.map((a) => (
+                  <div className="asset" key={a.id}>
+                    <span>{a.type === "video" ? "🎬" : a.type === "image" ? "🖼️" : "🎵"}</span>
+                    <div style={{ minWidth: 0 }}>
+                      <strong>{a.name}</strong>
+                      <small>
+                        {peso(a.size)} · {a.type}
+                      </small>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {(() => {
+              const r = resumenPlan(plan);
+              if (!r) return null;
+              return (
+                <section className="plan-card">
+                  <div style={{ flex: 1, minWidth: 220 }}>
+                    <p className="eyebrow">PLAN DE PRODUCCIÓN LISTO</p>
+                    <h2>{r.titulo}</h2>
+                    <p>
+                      {r.duracion}s · {r.escenas} escenas
+                      {r.cierre ? ` · cierre: “${r.cierre}”` : ""}
+                    </p>
+                    {job && (
+                      <div className="progreso">
+                        <div className="barra" style={{ width: `${Math.max(3, job.progreso)}%` }} />
+                        <span>
+                          {job.estado === "listo"
+                            ? `Listo en ${formatoDur(job.transcurrido)}`
+                            : `${job.mensaje || job.estado} · ${job.progreso}%${
+                                job.estimado ? ` · faltan ~${formatoDur(Math.max(5, job.estimado - (job.transcurrido ?? 0)))}` : ""
+                              }`}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <button
+                      className="button ghost"
+                      onClick={() => {
+                        setBorrador(leerPlan(plan));
+                        setEditor(true);
+                      }}
+                      disabled={generando}
+                    >
+                      Editar guion
+                    </button>
+                    <button className="button primary" onClick={generarReel} disabled={generando}>
+                      {generando ? (
+                        <>
+                          <span className="spinner" />
+                          Generando…
+                        </>
+                      ) : job?.estado === "listo" ? (
+                        "Generar otra versión →"
+                      ) : (
+                        "Generar reel →"
+                      )}
+                    </button>
+                  </div>
+                </section>
+              );
+            })()}
+
+            <section className="publish-card">
+              <div>
+                <p className="eyebrow">SIGUIENTE PASO</p>
+                <h2>Publicar cuando estés listo</h2>
+                <p>
+                  {conectado
+                    ? `Destino: ${cuentas.find((c) => c.id === cuentaSel)?.title ?? cuentas[0].title}`
+                    : "Conectá tu cuenta de YouTube para publicar."}
+                </p>
+              </div>
+              <button
+                className="button primary"
+                onClick={() => {
+                  if (!video) return avisar("Cargá un video para continuar", true);
+                  if (!conectado) {
+                    avisar("Primero conectá tu cuenta de YouTube", true);
+                    setVista("cuentas");
+                    return;
+                  }
+                  setModal(true);
+                }}
+              >
+                Preparar publicación →
+              </button>
+            </section>
+          </>
+        )}
+
+        {vista === "proyectos" && (
+          <div className="empty-state">
+            Este es tu primer proyecto: <strong>{proyecto}</strong>
+            <br />
+            <span>La lista de proyectos se activa cuando conectemos la base de datos.</span>
+          </div>
+        )}
+
+        {vista === "calendario" && (
+          <>
+            <div className="section-heading" style={{ marginBottom: 14 }}>
+              <div>
+                <p className="eyebrow">PROGRAMADOS</p>
+                <h2 style={{ margin: 0, fontSize: 19 }}>
+                  {agenda.length === 0
+                    ? "Sin publicaciones programadas"
+                    : `${agenda.length} publicación${agenda.length === 1 ? "" : "es"}`}
+                </h2>
+              </div>
+              <button className="button secondary" onClick={cargarAgenda}>
+                Actualizar
+              </button>
+            </div>
+
+            {agenda.length === 0 ? (
+              <div className="calendar-empty">
+                Todavía no hay publicaciones programadas.
+                <br />
+                <span>
+                  Al publicar, activá «Publicar más tarde» y elegí fecha y hora. YouTube la sube
+                  privada y la hace pública solo.
+                </span>
+              </div>
+            ) : (
+              <div className="agenda">
+                {agenda.map((p) => {
+                  const fecha = new Date(p.publishAt);
+                  const pasado = fecha.getTime() < Date.now();
+                  return (
+                    <div className={`agenda-item${pasado ? " pasado" : ""}`} key={p.id}>
+                      <div className="fecha">
+                        <strong>{fecha.toLocaleDateString("es", { day: "2-digit", month: "short" })}</strong>
+                        <span>{fecha.toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" })}</span>
+                      </div>
+                      <div className="detalle">
+                        <strong>{p.titulo || "Sin título"}</strong>
+                        <span>
+                          {p.canal}
+                          {pasado ? " · ya publicado" : ""}
+                        </span>
+                      </div>
+                      {p.url && (
+                        <a className="button ghost" href={p.url} target="_blank" rel="noreferrer">
+                          Ver
+                        </a>
+                      )}
+                      <button
+                        className="button danger"
+                        onClick={async () => {
+                          if (!window.confirm("¿Quitar de la agenda? (el video sigue en YouTube)")) return;
+                          const res = await fetch(`/api/schedule?id=${p.id}`, { method: "DELETE" });
+                          const data = (await res.json()) as { items?: Programado[] };
+                          setAgenda(data.items ?? []);
+                          avisar("Quitado de la agenda");
+                        }}
+                      >
+                        Quitar
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </>
+        )}
+
+        {vista === "cuentas" && (
+          <>
+            <div className="section-heading" style={{ marginBottom: 14 }}>
+              <div>
+                <p className="eyebrow">CANAL DE DESTINO</p>
+                <h2 style={{ margin: 0, fontSize: 19 }}>Tus canales de YouTube</h2>
+              </div>
+              <a className="button primary" href="/api/youtube/oauth/start">
+                ＋ Conectar canal
+              </a>
+            </div>
+
+            <div className="accounts-grid">
+              {cuentas.map((c) => (
+                <div className="account" key={c.id}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    className="netlogo avatar"
+                    src={c.thumbnail || "https://i.ytimg.com/vi/placeholder/default.jpg"}
+                    alt={c.title}
+                  />
+                  <div className="info">
+                    <strong>{c.title}</strong>
+                    <span>
+                      {c.subscribers} subs · {c.videos} videos
+                      {c.shared ? " · canal del servidor" : ""}
+                    </span>
+                  </div>
+                  <button className="button danger" onClick={() => desconectar(c.id, c.title)}>
+                    Desconectar
+                  </button>
+                </div>
+              ))}
+
+              {[
+                ["Instagram", "ig", "◎"],
+                ["TikTok", "tk", "♪"],
+                ["Facebook", "fb", "f"],
+              ].map(([nombre, clase, ico]) => (
+                <div className="account" key={nombre}>
+                  <b className={`netlogo ${clase}`}>{ico}</b>
+                  <div className="info">
+                    <strong>{nombre}</strong>
+                    <span>Próximamente</span>
+                  </div>
+                  <button
+                    className="button secondary"
+                    onClick={() => avisar(`${nombre}: conector en la próxima fase`)}
+                  >
+                    Conectar
+                  </button>
+                </div>
+              ))}
+            </div>
+
+            {!yt?.configured && (
+              <div className="alert warn">
+                Faltan las credenciales de Google. Copiá <code>.env.example</code> a{" "}
+                <code>.env.local</code>, completá <code>YOUTUBE_CLIENT_ID</code> y{" "}
+                <code>YOUTUBE_CLIENT_SECRET</code>, y reiniciá el servidor.
+              </div>
+            )}
+
+            <div className="notice">
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <strong>¿Cómo conecta cada usuario su cuenta?</strong>
+                <button className="button ghost" onClick={() => setMostrarGuia((v) => !v)}>
+                  {mostrarGuia ? "Ocultar guía" : "Ver guía"}
+                </button>
+              </div>
+
+              {mostrarGuia && (
+                <ol style={{ margin: "12px 0 0", paddingLeft: 20, lineHeight: 2 }}>
+                  <li>
+                    Entrá a <code>console.cloud.google.com</code> y creá un proyecto (o usá uno).
+                  </li>
+                  <li>
+                    <em>APIs y servicios → Biblioteca</em>: habilitá <strong>YouTube Data API v3</strong>.
+                  </li>
+                  <li>
+                    <em>Pantalla de consentimiento OAuth</em>: tipo <strong>Externo</strong>. Mientras la app
+                    esté en modo <strong>Prueba</strong>, agregá a cada persona en{" "}
+                    <strong>Usuarios de prueba</strong> (máximo 100).
+                  </li>
+                  <li>
+                    <em>Credenciales → Crear credenciales → ID de cliente OAuth</em>: tipo{" "}
+                    <strong>Aplicación de escritorio</strong> (permite localhost sin registrar cada puerto).
+                  </li>
+                  <li>
+                    Pegá el <strong>Client ID</strong> y el <strong>Client Secret</strong> en{" "}
+                    <code>web/.env.local</code> y reiniciá.
+                  </li>
+                  <li>
+                    Cada usuario entra al panel y toca <strong>Conectar canal</strong>. Autoriza con su propia
+                    cuenta de Google y vuelve solo.
+                  </li>
+                </ol>
+              )}
+
+              {yt?.redirectUri && (
+                <div style={{ marginTop: 12 }}>
+                  URI de redirección de este servidor:{" "}
+                  <code style={{ color: "#c8d1e5", wordBreak: "break-all" }}>{yt.redirectUri}</code>
+                </div>
+              )}
+            </div>
+
+            <div className="notice">
+              <strong>Privacidad:</strong> cada persona que entra al panel conecta su propia cuenta y
+              solo ve sus canales. Los tokens quedan en el servidor (<code>web/data/accounts.json</code>) y
+              nunca viajan al navegador. Al desconectar se borra el permiso guardado.
+            </div>
+          </>
+        )}
+      </main>
+
+      {modal && (
+        <div className="modal-backdrop" onClick={() => !subiendo && setModal(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Publicar en YouTube</h2>
+            <p style={{ color: "var(--muted)", fontSize: 12.5, margin: 0 }}>
+              {video ? `${video.name} · ${peso(video.size)}` : "Sin video"}
+            </p>
+
+            <div className="field">
+              <label>CANAL DE DESTINO</label>
+              <select value={cuentaSel} onChange={(e) => setCuentaSel(e.target.value)}>
+                {cuentas.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.title} ({c.subscribers} subs)
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="field">
+              <label>TÍTULO</label>
+              <input
+                type="text"
+                value={titulo}
+                maxLength={100}
+                onChange={(e) => setTitulo(e.target.value)}
+                placeholder="Título del video"
+              />
+              <div className="hint">{titulo.length}/100 caracteres</div>
+            </div>
+
+            <div className="field">
+              <label>DESCRIPCIÓN</label>
+              <textarea
+                value={descripcion}
+                onChange={(e) => setDescripcion(e.target.value)}
+                placeholder="Descripción, hashtags, créditos..."
+              />
+            </div>
+
+            <div className="field row-2">
+              <div>
+                <label>TAGS (separados por coma)</label>
+                <input type="text" value={tags} onChange={(e) => setTags(e.target.value)} />
+              </div>
+              <div>
+                <label>VISIBILIDAD</label>
+                <select
+                  value={privacidad}
+                  onChange={(e) => setPrivacidad(e.target.value as typeof privacidad)}
+                >
+                  <option value="public">Público</option>
+                  <option value="unlisted">No listado</option>
+                  <option value="private">Privado</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="field">
+              <label>PROGRAMAR PUBLICACIÓN</label>
+              <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <label
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 7,
+                    margin: 0,
+                    fontSize: 12.5,
+                    letterSpacing: 0,
+                    textTransform: "none",
+                    color: "var(--text)",
+                    fontWeight: 500,
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={programar}
+                    onChange={(e) => setProgramar(e.target.checked)}
+                    style={{ width: "auto" }}
+                  />
+                  Publicar más tarde
+                </label>
+                {programar && (
+                  <input
+                    type="datetime-local"
+                    value={cuando}
+                    onChange={(e) => setCuando(e.target.value)}
+                    style={{ width: "auto" }}
+                  />
+                )}
+              </div>
+              <div className="hint">
+                {programar
+                  ? "El video se sube como privado y YouTube lo publica solo a esa hora."
+                  : "Si no programás, se publica ahora con la visibilidad elegida."}
+              </div>
+            </div>
+
+            <div className="field">
+              <label>MINIATURA (opcional)</label>
+              <button className="button secondary" onClick={() => inputMini.current?.click()}>
+                {miniatura ? miniatura.name : "Elegir imagen"}
+              </button>
+              <input
+                ref={inputMini}
+                type="file"
+                accept="image/jpeg,image/png"
+                hidden
+                onChange={(e) => setMiniatura(e.target.files?.[0] ?? null)}
+              />
+              <div className="hint">JPG o PNG. Para Shorts, vertical 1080x1920.</div>
+            </div>
+
+            {error && <div className="alert err">{error}</div>}
+            {resultado && (
+              <div className="alert ok">
+                Publicado en {resultado.channel}:{" "}
+                <a href={resultado.url} target="_blank" rel="noreferrer">
+                  {resultado.url}
+                </a>
+                {resultado.thumbnailWarning && (
+                  <div style={{ marginTop: 6 }}>Miniatura: {resultado.thumbnailWarning}</div>
+                )}
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button className="button ghost" onClick={() => setModal(false)} disabled={subiendo}>
+                {resultado ? "Cerrar" : "Cancelar"}
+              </button>
+              <button className="button primary" onClick={publicar} disabled={subiendo || Boolean(resultado)}>
+                {subiendo ? (
+                  <>
+                    <span className="spinner" />
+                    Subiendo…
+                  </>
+                ) : (
+                  "Publicar"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editor && borrador && (
+        <div className="modal-backdrop" onClick={() => setEditor(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h2>Editar el guion</h2>
+            <p style={{ color: "var(--muted)", fontSize: 12.5, margin: 0 }}>
+              Ajustá el texto antes de generar. Los cambios se aplican a este render.
+            </p>
+
+            <div className="field">
+              <label>TÍTULO</label>
+              <input
+                type="text"
+                value={borrador.titulo ?? ""}
+                onChange={(e) => setBorrador({ ...borrador, titulo: e.target.value })}
+              />
+            </div>
+
+            <div className="field">
+              <label>GANCHO (dos líneas separadas con |)</label>
+              <input
+                type="text"
+                value={borrador.gancho ?? ""}
+                onChange={(e) => setBorrador({ ...borrador, gancho: e.target.value })}
+              />
+              <div className="hint">Ej: NO CONTESTES SI TE LLAMAN|A LAS TRES DE LA MAÑANA</div>
+            </div>
+
+            <div className="field">
+              <label>GUION (lo que dice la voz)</label>
+              <textarea
+                style={{ minHeight: 150 }}
+                value={borrador.vozTexto ?? ""}
+                onChange={(e) => setBorrador({ ...borrador, vozTexto: e.target.value })}
+              />
+              <div className="hint">
+                {(borrador.vozTexto ?? "").length} caracteres · ≈{" "}
+                {Math.round((borrador.vozTexto ?? "").length / 15.5)}s de voz
+              </div>
+            </div>
+
+            <div className="field row-2">
+              <div>
+                <label>CIERRE (la pregunta final)</label>
+                <input
+                  type="text"
+                  value={borrador.cierre ?? ""}
+                  onChange={(e) => setBorrador({ ...borrador, cierre: e.target.value })}
+                />
+              </div>
+              <div>
+                <label>DURACIÓN OBJETIVO (s)</label>
+                <input
+                  type="number"
+                  value={borrador.duracion ?? 30}
+                  onChange={(e) => setBorrador({ ...borrador, duracion: Number(e.target.value) })}
+                />
+              </div>
+            </div>
+
+            <div className="field">
+              <label>ESCENAS ({(borrador.escenas ?? []).length})</label>
+              <div className="escenas-editor">
+                {(borrador.escenas ?? []).map((esc, i) => (
+                  <div className="escena-fila" key={i}>
+                    <span className="num">{i + 1}</span>
+                    <div className="campos">
+                      <input
+                        type="text"
+                        value={esc.descripcion ?? ""}
+                        placeholder="qué se ve"
+                        onChange={(e) => {
+                          const escenas = [...(borrador.escenas ?? [])];
+                          escenas[i] = { ...esc, descripcion: e.target.value };
+                          setBorrador({ ...borrador, escenas });
+                        }}
+                      />
+                      <input
+                        type="text"
+                        value={esc.busqueda ?? ""}
+                        placeholder="búsqueda en inglés"
+                        onChange={(e) => {
+                          const escenas = [...(borrador.escenas ?? [])];
+                          escenas[i] = { ...esc, busqueda: e.target.value };
+                          setBorrador({ ...borrador, escenas });
+                        }}
+                      />
+                    </div>
+                    <input
+                      className="dur"
+                      type="number"
+                      step="0.5"
+                      value={esc.dur ?? 5}
+                      onChange={(e) => {
+                        const escenas = [...(borrador.escenas ?? [])];
+                        escenas[i] = { ...esc, dur: Number(e.target.value) };
+                        setBorrador({ ...borrador, escenas });
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="hint">
+                La búsqueda define qué material se descarga o se elige. Cuanto más concreta, mejor.
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button className="button ghost" onClick={() => setEditor(false)}>
+                Cancelar
+              </button>
+              <button
+                className="button primary"
+                onClick={() => {
+                  setPlan(JSON.stringify(borrador, null, 2));
+                  setJob(null);
+                  setEditor(false);
+                  avisar("Guion actualizado");
+                }}
+              >
+                Guardar cambios
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toast && <div className={`toast${toast.error ? " err" : ""}`}>{toast.texto}</div>}
+    </div>
+  );
+}
