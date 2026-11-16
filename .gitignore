@@ -18,6 +18,9 @@ data/
 workspace/**/*
 !workspace/**/.gitkeep
 
+# compilacion de TypeScript
+*.tsbuildinfo
+
 # sistema
 Thumbs.db
 desktop.ini
