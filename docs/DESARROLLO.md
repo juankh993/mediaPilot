@@ -504,3 +504,33 @@ cookie manipulada (rechazada) · logout · y al entrar se ven los canales del us
 - Recuperacion de contrasena (hoy no existe).
 - Limite de intentos de login (hoy no hay).
 - En produccion conviene mover `users.json`, `accounts.json` y `schedule.json` a una base real.
+
+### 2026-11-16 — motor de render portado a `engine/`
+
+**Problema:** el panel llamaba a `reel.ps1`, `fix-loudness.ps1`, `tts-palabras.py` y los
+buscadores en `ENGINE_DIR`, pero esos scripts **no estaban en el repo**. En un clon limpio
+"Generar reel" fallaba: no había voz, ni montaje, ni material.
+
+**Qué se hizo:**
+
+- Se copiaron los scripts del repo anterior (rama `feature/panel-web`) a `engine/`:
+  `reel.ps1`, `fix-loudness.ps1`, `tts-palabras.py`, `gemini-tts.py`, `alinear-srt.py`,
+  `detectar-audio.py`, `buscar-unsplash.ps1`, `buscar-fotos.ps1`.
+- **`reel.ps1` ahora resuelve rutas por `$PSScriptRoot`** en vez de asumir `./scripts`,
+  porque el panel lo ejecuta con `cwd = WORKSPACE_DIR`. También crea `02-voz/` y `logs/`
+  si faltan y la subcarpeta de `salida` (`panel/<id>.mp4`).
+- **Claves por variable de entorno o archivo:** `UNSPLASH_KEY` / `PIXABAY_KEY` o
+  `engine/.unsplash.key` / `engine/.pixabay.key` (gitignored).
+- **`buscar-unsplash.ps1` acepta `-Orientacion vertical`** (la API lo llama `portrait`).
+  El panel ya pedía "vertical", así que antes la descarga fallaba en la validación de parámetros.
+- **Búsquedas que acumulan:** `buscar-fotos.ps1` ya no borra lo descargado antes (solo con
+  `-Limpiar`) y ambos buscadores siguen numerando en vez de pisar archivos.
+- `WS` incluye `02-voz` y `logs`, y `iniciarRender` llama a `ensureWorkspace()`.
+
+**Verificado (2026-11-16):** render real de 3 escenas → 9,1s, 1080x1920, h264+aac,
+subtítulos y gancho OK, `fix-loudness` deja **−14,4 LUFS / −1,5 dBTP**; descarga de Unsplash
+con `-Orientacion vertical` OK. Los scripts de prueba se borraron del workspace.
+
+**Nota de encoding:** los `.ps1` se guardan con **UTF-8 BOM**. Sin BOM, PowerShell 5.1 los lee
+como ANSI y rompe los acentos (por ejemplo el CTA o los mensajes).
+

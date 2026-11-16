@@ -15,7 +15,8 @@ build/
 data/
 
 # workspace de usuario (contenido, no codigo)
-workspace/**/*
+workspace/**
+!workspace/**/
 !workspace/**/.gitkeep
 
 # compilacion de TypeScript

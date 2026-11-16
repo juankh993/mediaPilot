@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { ENGINE_DIR, WORKSPACE_DIR, WS } from "./config";
+import { ENGINE_DIR, WORKSPACE_DIR, WS, ensureWorkspace } from "./config";
 import {
   elegirGenerico,
   elegirMaterial,
@@ -369,6 +369,8 @@ export function iniciarRender(plan: Plan): EstadoTrabajo {
       trabajo.estado = "renderizando";
       trabajo.progreso = 5;
       trabajo.mensaje = "Eligiendo material para cada escena…";
+
+      ensureWorkspace();
 
       const dirGuiones = path.join(WORKSPACE_DIR, WS.guiones, fecha);
       fs.mkdirSync(dirGuiones, { recursive: true });

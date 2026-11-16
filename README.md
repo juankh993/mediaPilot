@@ -56,18 +56,21 @@ El panel separa dos cosas:
 | Variable | Qué contiene |
 |---|---|
 | `WORKSPACE_DIR` | Guiones, material visual, música y videos renderizados. **Un workspace por canal/cliente.** |
-| `ENGINE_DIR` | Los scripts de render (`reel.ps1`, `tts-palabras.py`, `fix-loudness.ps1`…). |
+| `ENGINE_DIR` | Los scripts de render (`reel.ps1`, `tts-palabras.py`, `fix-loudness.ps1`…). Vienen incluidos en `engine/`. |
 
 Así el mismo panel sirve para varios canales sin tocar el código: solo cambia el workspace.
+El detalle del motor y su contrato con el panel están en `engine/README.md`.
 
 Estructura del workspace:
 
 ```text
 workspace/
 ├── 01-guiones/     configuraciones de cada reel (JSON)
+├── 02-voz/         audio de la voz y subtítulos (.mp3 / .srt)
 ├── 03-visual/      fotos y clips
 ├── 05-musica/      pistas de fondo
-└── 06-salida/      videos finales (los del panel van a panel/)
+├── 06-salida/      videos finales (los del panel van a panel/)
+└── logs/           temporales del render
 ```
 
 ---
@@ -125,6 +128,7 @@ recuperación de contraseña y base de datos real en vez de archivos JSON.
 - `docs/DESARROLLO.md` — arquitectura, decisiones, bitácora y pendientes
 - `docs/GOOGLE-CLOUD-PRODUCCION.md` — cómo configurar la API para producción
 - `docs/IA-MODELOS.md` — qué modelos hay, qué cuesta cada uno y qué está habilitado
+- `engine/README.md` — motor de render: contrato con el panel, requisitos y scripts
 
 ---
 

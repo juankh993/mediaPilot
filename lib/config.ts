@@ -47,9 +47,11 @@ export const ENGINE_DIR = (() => {
 /** Subcarpetas del workspace que usa el panel. */
 export const WS = {
   guiones: "01-guiones",
+  voz: "02-voz",
   visual: "03-visual",
   musica: "05-musica",
   salida: "06-salida",
+  logs: "logs",
 };
 
 export function ensureDirs() {
